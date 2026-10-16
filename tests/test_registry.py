@@ -159,6 +159,110 @@ class Record(Case):
         self.assertEqual(self.bad(testEnv={"port": 1}), 1)
 
 
+class Platforms(Case):
+    def build(self, name, manifest=MANIFEST, files=None):
+        path = self.dir / f"{name}.zip"
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("manifest.json", json.dumps(manifest))
+            for n, data in (files or {"bin/driver": name}).items():
+                zf.writestr(n, data)
+        return path
+
+    def record(self, archives, **over):
+        record = {
+            "id": "acme.redis-driver",
+            "version": "1.0.0",
+            "platforms": {
+                key: {"downloadUrl": URL.replace("ext.zip", f"{key}.zip"),
+                      "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                for key, path in archives.items()
+            },
+        }
+        record.update(over)
+        path = self.dir / f"{record['id']}.json"
+        path.write_text(json.dumps(record))
+        return path
+
+    def run_check(self, archives, record_path, extract=None):
+        out = self.dir / "entry.json"
+        argv = ["check", str(record_path), "--out", str(out)]
+        for key, path in archives.items():
+            argv += ["--archive", f"{key}={path}"]
+        if extract:
+            argv += ["--extract", str(extract)]
+        return registry.main(argv), out
+
+    def test_one_archive_per_platform(self):
+        archives = {"linux-x64": self.build("l"), "macos-arm64": self.build("m"),
+                    "windows-x64": self.build("w", manifest=dict(MANIFEST, main="bin/driver.exe"),
+                                              files={"bin/driver.exe": "w"})}
+        code, out = self.run_check(archives, self.record(archives))
+        self.assertEqual(code, 0)
+        entry = json.loads(out.read_text())
+        self.assertNotIn("downloadUrl", entry)
+        self.assertEqual(sorted(entry["platforms"]), ["linux-x64", "macos-arm64", "windows-x64"])
+        win = entry["platforms"]["windows-x64"]
+        self.assertEqual(win["main"], "bin/driver.exe")
+        self.assertEqual(win["sha256"], hashlib.sha256(archives["windows-x64"].read_bytes()).hexdigest())
+        self.assertEqual(win["size"], archives["windows-x64"].stat().st_size)
+        self.assertTrue(win["downloadUrl"].endswith("/windows-x64.zip"))
+
+    def test_the_linux_build_is_what_gets_extracted_for_testing(self):
+        archives = {"macos-arm64": self.build("m"), "linux-x64": self.build("l")}
+        extract = self.dir / "ext"
+        self.assertEqual(self.run_check(archives, self.record(archives), extract)[0], 0)
+        self.assertEqual((extract / "bin" / "driver").read_text(), "l")
+
+    def test_no_linux_build_means_nothing_to_extract_or_test(self):
+        archives = {"macos-arm64": self.build("m")}
+        extract = self.dir / "ext"
+        code, out = self.run_check(archives, self.record(archives), extract)
+        self.assertEqual(code, 0)
+        self.assertFalse(extract.exists())
+        record = self.dir / "acme.redis-driver.json"
+        data = json.loads(record.read_text())
+        data["testEnv"] = {"image": "ghcr.io/queryahub/querya-testdb-redis:0.4.19", "port": 6379}
+        record.write_text(json.dumps(data))
+        buf = self.dir / "args.txt"
+        import contextlib, io
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            registry.main(["test-args", str(record), str(out)])
+        self.assertIn("testable=false", stream.getvalue())
+
+    def test_a_platform_that_disagrees_is_refused(self):
+        archives = {"linux-x64": self.build("l"),
+                    "macos-arm64": self.build("m", manifest=dict(MANIFEST, name="Other"))}
+        self.assertEqual(self.run_check(archives, self.record(archives))[0], 1)
+        archives = {"linux-x64": self.build("l"),
+                    "macos-arm64": self.build("m", manifest=dict(MANIFEST, version="2.0.0"))}
+        self.assertEqual(self.run_check(archives, self.record(archives))[0], 1)
+
+    def test_a_wrong_hash_names_the_platform(self):
+        archives = {"linux-x64": self.build("l")}
+        record = self.record(archives)
+        data = json.loads(record.read_text())
+        data["platforms"]["linux-x64"]["sha256"] = "0" * 64
+        record.write_text(json.dumps(data))
+        self.assertEqual(self.run_check(archives, record)[0], 1)
+
+    def test_record_shape(self):
+        archives = {"linux-x64": self.build("l")}
+        for bad in (
+            {"platforms": {}},
+            {"platforms": {"plan9-x64": {"downloadUrl": URL, "sha256": "a" * 64}}},
+            {"platforms": {"linux-x64": {"downloadUrl": URL}}},
+            {"platforms": {"linux-x64": {"downloadUrl": URL, "sha256": "a" * 64, "extra": 1}}},
+            {"downloadUrl": URL, "sha256": "a" * 64},  # both forms
+        ):
+            record = self.record(archives, **bad)
+            self.assertEqual(self.run_check(archives, record)[0], 1, bad)
+        data = {"id": "acme.redis-driver", "version": "1.0.0"}  # neither form
+        path = self.dir / "acme.redis-driver.json"
+        path.write_text(json.dumps(data))
+        self.assertEqual(self.run_check(archives, path)[0], 1)
+
+
 class BuildIndex(Case):
     def test_joins_entries_and_copies_compat(self):
         entries = self.dir / "entries"

@@ -32,7 +32,9 @@ ASSET_RE = re.compile(r"^https://github\.com/[^/]+/[^/]+/releases/download/[^/]+
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 IMAGE_RE = re.compile(r"^ghcr\.io/queryahub/querya-testdb-[a-z0-9-]+:[A-Za-z0-9._-]+$")
 
-RECORD_KEYS = {"id", "version", "downloadUrl", "sha256", "yanked", "testEnv"}
+# Build targets of per-platform archives; the names are the app's (and the tester's).
+PLATFORMS = ("linux-x64", "macos-arm64", "macos-x64", "windows-x64")
+RECORD_KEYS = {"id", "version", "downloadUrl", "sha256", "platforms", "yanked", "testEnv"}
 TESTENV_KEYS = {"image", "port", "connect", "query", "table", "database"}
 # Fields copied from manifest.json into the index. The record never supplies them.
 MANIFEST_KEYS = [
@@ -46,6 +48,13 @@ class CheckError(Exception):
     pass
 
 
+def validate_source(url, sha, where):
+    if not isinstance(url, str) or not ASSET_RE.match(url):
+        raise CheckError(f"{where}downloadUrl must be https://github.com/<owner>/<repo>/releases/download/<tag>/<asset>")
+    if not isinstance(sha, str) or not SHA_RE.match(sha):
+        raise CheckError(f"{where}sha256 must be 64 lowercase hex characters")
+
+
 def validate_record(record, filename):
     """The rules of schema/record.schema.json, without a dependency."""
     if not isinstance(record, dict):
@@ -53,7 +62,7 @@ def validate_record(record, filename):
     extra = set(record) - RECORD_KEYS
     if extra:
         raise CheckError(f"unknown field(s): {', '.join(sorted(extra))}")
-    for key in ("id", "version", "downloadUrl", "sha256"):
+    for key in ("id", "version"):
         if not isinstance(record.get(key), str):
             raise CheckError(f"{key} is required and must be a string")
     if not ID_RE.match(record["id"]):
@@ -62,10 +71,25 @@ def validate_record(record, filename):
         raise CheckError(f"the file must be named {record['id']}.json")
     if not VERSION_RE.match(record["version"]):
         raise CheckError("version must be x.y.z")
-    if not ASSET_RE.match(record["downloadUrl"]):
-        raise CheckError("downloadUrl must be https://github.com/<owner>/<repo>/releases/download/<tag>/<asset>")
-    if not SHA_RE.match(record["sha256"]):
-        raise CheckError("sha256 must be 64 lowercase hex characters")
+
+    single = "downloadUrl" in record or "sha256" in record
+    if single and "platforms" in record:
+        raise CheckError("use either downloadUrl + sha256 (one archive for every platform) or platforms, not both")
+    if not single and "platforms" not in record:
+        raise CheckError("downloadUrl + sha256, or platforms, is required")
+    if single:
+        validate_source(record.get("downloadUrl"), record.get("sha256"), "")
+    else:
+        platforms = record["platforms"]
+        if not isinstance(platforms, dict) or not platforms:
+            raise CheckError("platforms must be a non-empty object")
+        for key, source in platforms.items():
+            if key not in PLATFORMS:
+                raise CheckError(f"unknown platform {key!r}; use {', '.join(PLATFORMS)}")
+            if not isinstance(source, dict) or set(source) - {"downloadUrl", "sha256"}:
+                raise CheckError(f"platforms.{key} must have only downloadUrl and sha256")
+            validate_source(source.get("downloadUrl"), source.get("sha256"), f"platforms.{key}.")
+
     if "yanked" in record and not isinstance(record["yanked"], bool):
         raise CheckError("yanked must be true or false")
     env = record.get("testEnv")
@@ -155,7 +179,12 @@ def inspect_archive(path):
         return manifest
 
 
-def make_entry(record, manifest, size):
+# What every platform's manifest.json has to agree on (main may differ: bin/x vs bin/x.exe).
+SAME_ACROSS_PLATFORMS = ("id", "version", "name", "type", "engines")
+
+
+def base_entry(record, manifest):
+    """The index entry's fields that come from manifest.json."""
     for key in ("id", "version"):
         if manifest.get(key) != record[key]:
             raise CheckError(f"manifest.json {key} is {manifest.get(key)!r}, the record says {record[key]!r}")
@@ -165,11 +194,14 @@ def make_entry(record, manifest, size):
     engines = manifest.get("engines")
     if not isinstance(engines, dict) or not isinstance(engines.get("querya_desktop"), str):
         raise CheckError('manifest.json needs engines.querya_desktop, for example ">=0.4.19"')
-    entry = {k: manifest[k] for k in MANIFEST_KEYS if k in manifest}
-    entry.update(downloadUrl=record["downloadUrl"], sha256=record["sha256"], size=size)
-    if record.get("yanked"):
-        entry["yanked"] = True
-    return entry
+    return {k: manifest[k] for k in MANIFEST_KEYS if k in manifest}
+
+
+def sources_of(record):
+    """{platform or None: (url, sha256)}: None is one archive for every platform."""
+    if "platforms" in record:
+        return {k: (v["downloadUrl"], v["sha256"]) for k, v in record["platforms"].items()}
+    return {None: (record["downloadUrl"], record["sha256"])}
 
 
 def cmd_check(args):
@@ -180,24 +212,63 @@ def cmd_check(args):
         raise CheckError(f"{record_path.name} is not valid JSON: {e}")
     validate_record(record, record_path.name)
 
-    if args.archive:
-        archive = Path(args.archive)  # tests and fixtures only: skips the download
-        size = archive.stat().st_size
+    local = {}  # tests and fixtures: --archive [PLATFORM=]FILE skips the download
+    for item in args.archive or []:
+        key, sep, path = item.partition("=")
+        local[key if sep else None] = Path(path if sep else key)
+
+    entry = None
+    platforms = {}
+    first_manifest = None
+    testable = None  # the archive CI can run: linux-x64, or the one for every platform
+    for key, (url, sha) in sources_of(record).items():
+        label = key or "all"
+        if key in local:
+            archive, size = local[key], local[key].stat().st_size
+        else:
+            archive = Path(args.out).with_name(f"{Path(args.out).stem}-{label}.zip")
+            size = download(url, archive)
+        actual = sha256_of(archive)
+        if actual != sha:
+            raise CheckError(f"{label}: sha256 mismatch: the record says {sha}, the asset is {actual}")
+        try:
+            manifest = inspect_archive(archive)
+            fields = base_entry(record, manifest)
+        except CheckError as e:
+            raise CheckError(f"{label}: {e}")
+        if first_manifest is None:
+            first_manifest, entry = manifest, fields
+        else:
+            for same in SAME_ACROSS_PLATFORMS:
+                if manifest.get(same) != first_manifest.get(same):
+                    raise CheckError(f"{label}: manifest.json {same} differs from the other platforms")
+        platforms[key] = {"downloadUrl": url, "sha256": sha, "size": size, "main": manifest.get("main")}
+        if key in (None, "linux-x64"):
+            testable = archive
+            if key == "linux-x64":  # prefer the manifest of the build that is tested
+                first_manifest, entry = manifest, fields
+
+    if None in platforms:
+        only = platforms[None]
+        entry.update(downloadUrl=only["downloadUrl"], sha256=only["sha256"], size=only["size"])
     else:
-        archive = Path(args.out).with_suffix(".zip")
-        size = download(record["downloadUrl"], archive)
-    actual = sha256_of(archive)
-    if actual != record["sha256"]:
-        raise CheckError(f"sha256 mismatch: the record says {record['sha256']}, the asset is {actual}")
-    manifest = inspect_archive(archive)
-    entry = make_entry(record, manifest, size)
+        entry["platforms"] = {
+            k: {kk: vv for kk, vv in v.items() if vv is not None} for k, v in sorted(platforms.items())
+        }
+    if record.get("yanked"):
+        entry["yanked"] = True
     Path(args.out).write_text(json.dumps(entry, indent=2, sort_keys=True) + "\n")
-    if args.extract:
-        with zipfile.ZipFile(archive) as zf:
+
+    if args.extract and testable is not None:
+        with zipfile.ZipFile(testable) as zf:
             zf.extractall(args.extract)
-    if not args.archive and not args.keep_archive:
-        archive.unlink(missing_ok=True)
-    print(f"ok {record['id']} {record['version']} ({size} bytes)")
+    if not args.keep_archive:
+        for key in platforms:
+            if key not in local:
+                label = key or "all"
+                Path(args.out).with_name(f"{Path(args.out).stem}-{label}.zip").unlink(missing_ok=True)
+    total = sum(p["size"] for p in platforms.values())
+    print(f"ok {record['id']} {record['version']} ({len(platforms)} archive(s), {total} bytes)")
 
 
 def cmd_test_args(args):
@@ -206,7 +277,9 @@ def cmd_test_args(args):
     record = json.loads(Path(args.record).read_text())
     entry = json.loads(Path(args.entry).read_text())
     env = record.get("testEnv")
-    testable = entry.get("type") == "database_driver" and env is not None
+    # CI runs Linux x86-64: the one-for-all archive, or the linux-x64 build.
+    runnable = "platforms" not in entry or "linux-x64" in entry["platforms"]
+    testable = entry.get("type") == "database_driver" and env is not None and runnable
     out = {"testable": "true" if testable else "false"}
     if testable:
         connect = {"host": "127.0.0.1", "port": env["port"], **env.get("connect", {})}
@@ -256,7 +329,9 @@ def main(argv=None):
     check = sub.add_parser("check")
     check.add_argument("record")
     check.add_argument("--out", required=True)
-    check.add_argument("--archive", help="use this local zip instead of downloading (tests, fixtures)")
+    check.add_argument("--archive", action="append",
+                       help="use this local zip instead of downloading (tests, fixtures); "
+                            "PLATFORM=FILE for a per-platform record, repeatable")
     check.add_argument("--extract", help="also unpack the archive here")
     check.add_argument("--keep-archive", action="store_true")
     check.set_defaults(func=cmd_check)
