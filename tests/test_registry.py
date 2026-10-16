@@ -118,6 +118,20 @@ class Check(Case):
         self.assertEqual(self.check(path, self.record(path))[0], 1)
 
 
+class EnginesRange(Case):
+    def code(self, engines):
+        archive = self.zip(manifest=dict(MANIFEST, engines={"querya_desktop": engines}))
+        return self.check(archive, self.record(archive))[0]
+
+    def test_ranges_the_app_can_read(self):
+        for ok in (">=0.4.19", "^0.4.11", "*", ">=0.4.0 <3.0.0", "  >0.4.0   <=0.5.0 ", "=0.4.19"):
+            self.assertEqual(self.code(ok), 0, ok)
+
+    def test_ranges_it_cannot(self):
+        for bad in ("~0.4", ">=0.4.0 || ^1.0.0", "0.4.19", ">=x", "", "* <3.0.0", ">=0.4", "latest"):
+            self.assertEqual(self.code(bad), 1, repr(bad))
+
+
 class ManifestVersion(Case):
     def entry(self, **manifest_over):
         archive = self.zip(manifest=dict(MANIFEST, **manifest_over))

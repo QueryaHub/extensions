@@ -36,6 +36,9 @@ IMAGE_RE = re.compile(r"^ghcr\.io/queryahub/querya-testdb-[a-z0-9-]+:[A-Za-z0-9.
 PLATFORMS = ("linux-x64", "macos-arm64", "macos-x64", "windows-x64")
 RECORD_KEYS = {"id", "version", "downloadUrl", "sha256", "platforms", "yanked", "testEnv"}
 TESTENV_KEYS = {"image", "port", "connect", "query", "table", "database"}
+# engines.querya_desktop: comparators that must all hold (as the app evaluates them) or `*`.
+COMPARATOR_RE = re.compile(r"^(?:(?:>=|<=|>|<|=)|\^)\d+\.\d+\.\d+$")
+
 # The newest manifest.json format Querya Desktop defines (`manifestVersion`, 1 when
 # absent). Raise it in the change that adds a format to Querya Desktop.
 MAX_MANIFEST_VERSION = 1
@@ -198,9 +201,21 @@ def base_entry(record, manifest):
     engines = manifest.get("engines")
     if not isinstance(engines, dict) or not isinstance(engines.get("querya_desktop"), str):
         raise CheckError('manifest.json needs engines.querya_desktop, for example ">=0.4.19"')
+    check_engines_range(engines["querya_desktop"])
     entry = {k: manifest[k] for k in MANIFEST_KEYS if k in manifest}
     entry["manifestVersion"] = manifest_version(manifest)
     return entry
+
+
+def check_engines_range(text):
+    """Querya Desktop hides an extension outside its range and cannot read any
+    other syntax (it would show the extension everywhere), so refuse one."""
+    parts = text.split()
+    if parts == ["*"] or (parts and all(COMPARATOR_RE.match(p) for p in parts)):
+        return
+    raise CheckError(
+        f"engines.querya_desktop {text!r} is not a range Querya Desktop can read; "
+        'use ^x.y.z, "*", or comparators such as ">=0.4.0 <3.0.0" (>=, >, <=, <, =)')
 
 
 def manifest_version(manifest):

@@ -70,7 +70,7 @@ For every record in a pull request:
 | `downloadUrl` is `https://github.com/<owner>/<repo>/releases/download/<tag>/<asset>` | the app only downloads GitHub release assets |
 | each asset downloads, is a zip of at most 100 MB, and its SHA-256 is the record's | what is listed is what is installed |
 | no entry leaves the extension folder (`..`, absolute, drive letters, symlinks), at most 500 MB unpacked | unpacking is safe |
-| `manifest.json` is at the root, its `id` and `version` equal the record's, it declares `engines.querya_desktop`, a driver's `main` is in the archive, and `manifestVersion` (the format of the manifest, 1 when absent) is one Querya Desktop defines | the manifest is the source of truth |
+| `manifest.json` is at the root, its `id` and `version` equal the record's, it declares `engines.querya_desktop` in a syntax the app can read (`^x.y.z`, `*`, or comparators like `>=0.4.0 <3.0.0`), a driver's `main` is in the archive, and `manifestVersion` (the format of the manifest, 1 when absent) is one Querya Desktop defines | the manifest is the source of truth |
 | a database driver with a `testEnv` passes [`querya-ext-tester`](https://github.com/QueryaHub/Querya-Desktop/blob/main/docs/extension-testing.md) **in the OS sandbox** against that database, for each Querya version in [`hosts.json`](hosts.json) | it works, and inside its declared permissions |
 
 `testEnv.image` must be a Querya test database
