@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://queryahub.github.io/extensions/schema/record.schema.json",
+  "title": "Extension registry record",
+  "description": "What an author writes in extensions/<id>.json. Everything else (name, type, engines, sandbox, ...) is read from manifest.json inside the archive, so it cannot disagree with the extension.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "version", "downloadUrl", "sha256"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*(\\.[a-z0-9]+(-[a-z0-9]+)*)+$",
+      "description": "Same as manifest.json id, for example acme.redis-driver. The file is named <id>.json."
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Same as manifest.json version."
+    },
+    "downloadUrl": {
+      "type": "string",
+      "pattern": "^https://github\\.com/[^/]+/[^/]+/releases/download/[^/]+/[^/]+$",
+      "description": "A release asset on GitHub. Nothing else is accepted."
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 of the archive, lowercase hex."
+    },
+    "yanked": {
+      "type": "boolean",
+      "description": "Hides the extension from the Marketplace without deleting the record."
+    },
+    "testEnv": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "port"],
+      "description": "The database the CI tests a database driver against.",
+      "properties": {
+        "image": {
+          "type": "string",
+          "pattern": "^ghcr\\.io/queryahub/querya-testdb-[a-z0-9-]+:[A-Za-z0-9._-]+$",
+          "description": "A Querya test database image."
+        },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "connect": { "type": "object", "description": "Extra db.connect parameters; host and port are filled in." },
+        "query": { "type": "string" },
+        "table": { "type": "string" },
+        "database": { "type": "string" }
+      }
+    }
+  }
+}

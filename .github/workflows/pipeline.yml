@@ -1,0 +1,76 @@
+name: Pipeline test
+
+# Exercises the whole chain on a real extension without publishing anything:
+# builds QueryaHub/extension-template, writes a record for it, runs the check,
+# builds the index from it and tests it against its database.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: QueryaHub/extension-template
+          path: template
+      - name: Package the template
+        working-directory: template
+        run: scripts/package.sh && (cd dist && zip -qr ../../template.zip .)
+      - name: Check the archive and build the index
+        run: |
+          set -euo pipefail
+          sha=$(sha256sum template.zip | cut -d' ' -f1)
+          mkdir -p fixture entries site
+          cat > fixture/example.redis-template.json <<JSON
+          {
+            "id": "example.redis-template",
+            "version": "0.1.0",
+            "downloadUrl": "https://github.com/QueryaHub/extension-template/releases/download/v0.1.0/ext.zip",
+            "sha256": "$sha",
+            "testEnv": { "image": "ghcr.io/queryahub/querya-testdb-redis:0.4.19", "port": 6379,
+                         "query": "GET querya:app:name", "table": "querya:app:name" }
+          }
+          JSON
+          python3 scripts/registry.py check fixture/example.redis-template.json \
+            --archive template.zip --out entries/example.redis-template.json
+          python3 scripts/registry.py build-index entries --out site
+          python3 - <<'PY'
+          import json
+          index = json.load(open("site/index.json"))
+          (e,) = index["extensions"]
+          assert index["schema"] == 1
+          assert e["id"] == "example.redis-template" and e["type"] == "database_driver"
+          assert e["engines"]["querya_desktop"], e
+          print("index ok:", e["id"], e["version"], e["size"], "bytes")
+          PY
+      - name: Test it against its database, in the sandbox
+        env:
+          HOSTS: "0.4.19 0.5.0"
+        run: |
+          set -euo pipefail
+          docker run -d --name testdb -p 6379:6379 ghcr.io/queryahub/querya-testdb-redis:0.4.19
+          for _ in $(seq 1 60); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' testdb)" = healthy ] && break
+            sleep 3
+          done
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --ro-bind / / /bin/true
+          mkdir ext && (cd ext && unzip -q ../template.zip)
+          tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/QueryaHub/Querya-Desktop/releases/latest)
+          ver="${tag##*/}"
+          curl -fsSL -o tester.tgz "https://github.com/QueryaHub/Querya-Desktop/releases/download/${ver}/querya-ext-tester-v${ver}-linux-x64.tar.gz"
+          tar xzf tester.tgz
+          for host in $HOSTS; do
+            ./querya-ext-tester ext --target-version "$host" --connect '{"host":"127.0.0.1","port":6379}' \
+              --query 'GET querya:app:name' --table querya:app:name --sandbox --junit "junit-$host.xml" --no-color
+            ! grep -q "OS sandbox is not available" "junit-$host.xml"
+          done

@@ -1,0 +1,120 @@
+name: Test a registry record
+description: >-
+  Checks a record (the release asset, its hash, manifest.json) and, for a
+  database driver with a testEnv, runs querya-ext-tester against that test
+  database inside the OS sandbox for one Querya Desktop version.
+
+inputs:
+  record:
+    description: Path of the record, extensions/<id>.json.
+    required: true
+  host:
+    description: Querya Desktop version to emulate.
+    required: true
+  soft:
+    description: Do not fail the step when the tests fail; only report it in `result`.
+    required: false
+    default: 'false'
+
+outputs:
+  result:
+    description: pass, fail or untested.
+    value: ${{ steps.result.outputs.result }}
+  entry:
+    description: Path of the index entry the check wrote.
+    value: ${{ steps.check.outputs.entry }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check the record and its release asset
+      id: check
+      shell: bash
+      env:
+        RECORD: ${{ inputs.record }}
+      run: |
+        set -euo pipefail
+        out="${RUNNER_TEMP}/record-$(basename "$RECORD" .json)"
+        rm -rf "$out" && mkdir -p "$out"
+        python3 "${{ github.action_path }}/../../../scripts/registry.py" check "$RECORD" \
+          --out "$out/entry.json" --extract "$out/ext"
+        echo "entry=$out/entry.json" >> "$GITHUB_OUTPUT"
+        echo "ext=$out/ext" >> "$GITHUB_OUTPUT"
+        python3 "${{ github.action_path }}/../../../scripts/registry.py" test-args "$RECORD" "$out/entry.json" >> "$GITHUB_OUTPUT"
+
+    - name: Start the test database
+      if: steps.check.outputs.testable == 'true'
+      shell: bash
+      env:
+        IMAGE: ${{ steps.check.outputs.image }}
+        PORT: ${{ steps.check.outputs.port }}
+      run: |
+        set -euo pipefail
+        docker run -d --name testdb -p "${PORT}:${PORT}" "$IMAGE"
+        for _ in $(seq 1 60); do
+          status=$(docker inspect -f '{{.State.Health.Status}}' testdb)
+          [ "$status" = healthy ] && exit 0
+          sleep 3
+        done
+        docker logs testdb
+        echo "::error::the test database did not become healthy"
+        exit 1
+
+    - name: Enable the OS sandbox (bubblewrap)
+      if: steps.check.outputs.testable == 'true'
+      shell: bash
+      run: |
+        sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+        # Ubuntu 24.04 runners block unprivileged user namespaces with AppArmor.
+        sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+        if ! bwrap --ro-bind / / /bin/true; then
+          echo "::error::bubblewrap cannot start on this runner, so the extension would run unsandboxed"
+          exit 1
+        fi
+
+    # The extension is the author's binary: it only ever runs in the sandbox,
+    # in a job without secrets (pull_request, never pull_request_target).
+    - name: querya-ext-tester
+      id: tester
+      if: steps.check.outputs.testable == 'true'
+      continue-on-error: true
+      uses: QueryaHub/Querya-Desktop/.github/actions/test-extension@33c8853ea97f22ed0dc626dca7ca6320cc6b066a
+      with:
+        extension-dir: ${{ steps.check.outputs.ext }}
+        target-version: ${{ inputs.host }}
+        connect: ${{ steps.check.outputs.connect }}
+        query: ${{ steps.check.outputs.query }}
+        table: ${{ steps.check.outputs.table }}
+        sandbox: "true"
+        junit-path: ${{ runner.temp }}/junit.xml
+
+    - name: Count a missing sandbox as a failure
+      id: sandbox
+      if: steps.check.outputs.testable == 'true' && steps.tester.outcome == 'success'
+      shell: bash
+      continue-on-error: true
+      run: |
+        if grep -q "OS sandbox is not available" "${RUNNER_TEMP}/junit.xml"; then
+          echo "::error::the extension ran without isolation"
+          exit 1
+        fi
+
+    - name: Result
+      id: result
+      shell: bash
+      env:
+        TESTABLE: ${{ steps.check.outputs.testable }}
+        TESTER: ${{ steps.tester.outcome }}
+        SANDBOX: ${{ steps.sandbox.outcome }}
+        SOFT: ${{ inputs.soft }}
+      run: |
+        if [ "$TESTABLE" != "true" ]; then
+          result=untested
+        elif [ "$TESTER" = success ] && [ "$SANDBOX" = success ]; then
+          result=pass
+        else
+          result=fail
+        fi
+        echo "result=$result" >> "$GITHUB_OUTPUT"
+        echo "result: $result"
+        if [ "$result" = fail ] && [ "$SOFT" != "true" ]; then exit 1; fi

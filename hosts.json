@@ -1,0 +1,4 @@
+{
+  "comment": "Querya Desktop versions every extension is tested against (the tester emulates each one's RPC surface). The newest is the next release.",
+  "hosts": ["0.4.19", "0.5.0"]
+}

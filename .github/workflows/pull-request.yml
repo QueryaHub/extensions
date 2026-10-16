@@ -1,0 +1,70 @@
+name: Pull request
+
+# Checks every record a pull request adds or changes: the release asset is
+# there, its hash matches, manifest.json inside agrees with the record, and a
+# database driver passes querya-ext-tester in the OS sandbox against its test
+# database for each Querya Desktop version in hosts.json.
+#
+# `pull_request`, never `pull_request_target`: the extension is the author's
+# binary and runs here, so this job has no secrets and a read-only token.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Registry scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s tests -v
+
+  plan:
+    name: Changed records
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          # A record outside extensions/ is not a record; one that was deleted has nothing to test.
+          files=$(git diff --name-only --diff-filter=AM "$base" HEAD -- 'extensions/*.json' | sort)
+          python3 - "$files" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, sys
+          files = [f for f in sys.argv[1].split("\n") if f]
+          hosts = json.load(open("hosts.json"))["hosts"]
+          include = [{"record": f, "host": h} for f in files for h in hosts]
+          print("matrix=" + json.dumps({"include": include}))
+          print(f"count={len(files)}")
+          PY
+
+  test:
+    name: ${{ matrix.record }} on ${{ matrix.host }}
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/test-record
+        with:
+          record: ${{ matrix.record }}
+          host: ${{ matrix.host }}

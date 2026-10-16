@@ -1,0 +1,173 @@
+name: Publish
+
+# Builds index.json from every record and deploys it to GitHub Pages:
+# https://queryahub.github.io/extensions/index.json (what Querya Desktop reads).
+# Runs on every merge, every night (an asset that disappeared or changed drops
+# out of the index) and on demand.
+#
+# A record that fails its check is left out of the index and listed in the job
+# summary; the job still deploys the rest and then fails, so it is noticed.
+on:
+  push:
+    branches: [main]
+    paths:
+      - extensions/**
+      - hosts.json
+      - scripts/**
+      - .github/**
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Records
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        run: |
+          python3 - >> "$GITHUB_OUTPUT" <<'PY'
+          import json, pathlib
+          files = sorted(str(p) for p in pathlib.Path("extensions").glob("*.json"))
+          hosts = json.load(open("hosts.json"))["hosts"]
+          include = [{"record": f, "host": h} for f in files for h in hosts]
+          print("matrix=" + json.dumps({"include": include}))
+          print(f"count={len(files)}")
+          PY
+
+  test:
+    name: ${{ matrix.record }} on ${{ matrix.host }}
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: t
+        uses: ./.github/actions/test-record
+        with:
+          record: ${{ matrix.record }}
+          host: ${{ matrix.host }}
+          soft: "true"
+      - name: Keep the result
+        if: always()
+        env:
+          RECORD: ${{ matrix.record }}
+          HOST: ${{ matrix.host }}
+          RESULT: ${{ steps.t.outputs.result || 'fail' }}
+        run: |
+          mkdir -p results
+          id=$(basename "$RECORD" .json)
+          printf '{"id":"%s","host":"%s","result":"%s"}\n' "$id" "$HOST" "$RESULT" > "results/${id}@${HOST}.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: result-${{ strategy.job-index }}
+          path: results/
+          if-no-files-found: error
+
+  index:
+    name: Build the index
+    needs: [plan, test]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      failed: ${{ steps.build.outputs.failed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          path: results
+          merge-multiple: true
+      - id: build
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p entries site
+          failed=()
+          for record in extensions/*.json; do
+            [ -e "$record" ] || continue
+            id=$(basename "$record" .json)
+            if python3 scripts/registry.py check "$record" --out "entries/$id.json"; then
+              :
+            else
+              failed+=("$id")
+              rm -f "entries/$id.json"
+            fi
+          done
+          python3 - <<'PY'
+          import glob, json
+          hosts = json.load(open("hosts.json"))["hosts"]
+          compat = {}
+          for path in sorted(glob.glob("results/*.json")):
+              r = json.load(open(path))
+              compat.setdefault(r["id"], {})[r["host"]] = r["result"]
+          json.dump({"schema": 1, "hosts": hosts, "extensions": compat},
+                    open("compat.json", "w"), indent=2, sort_keys=True)
+          PY
+          # An extension whose tests failed on every host is not offered.
+          python3 - <<'PY'
+          import json, os
+          compat = json.load(open("compat.json"))["extensions"]
+          for id_, hosts in compat.items():
+              if hosts and all(v == "fail" for v in hosts.values()):
+                  try:
+                      os.remove(f"entries/{id_}.json")
+                      print(f"left out (tests fail on every host): {id_}")
+                  except FileNotFoundError:
+                      pass
+          PY
+          python3 scripts/registry.py build-index entries --out site --compat compat.json
+          echo "failed=${failed[*]:-}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Registry"
+            echo "- records: $(ls extensions/*.json 2>/dev/null | wc -l)"
+            echo "- in the index: $(ls entries/*.json 2>/dev/null | wc -l)"
+            [ ${#failed[@]} -eq 0 ] || echo "- failed the check and left out: ${failed[*]}"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to Pages
+    needs: index
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  report:
+    name: Fail if a record was left out
+    needs: [index, deploy]
+    if: needs.index.outputs.failed != ''
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "::error::left out of the index: ${{ needs.index.outputs.failed }}"
+          exit 1
