@@ -66,9 +66,17 @@ After every merge, and every night, the index is rebuilt from all records:
 - `compat.json` — for each extension and each Querya version in `hosts.json`: `pass`, `fail` or `untested` (themes, or a driver without `testEnv`).
 
 The nightly run re-checks every asset. One that disappeared, or whose hash
-changed, fails its check and is **left out of the index**; the run then fails so
-the maintainers notice. An extension whose tests fail on every Querya version is
-left out as well.
+changed, fails its check and is **left out of the index**: an issue
+`Registry check failed: <id>` (label `registry-check`) is opened with the
+reason, the rest of the index is still deployed, and the run fails so the
+maintainers notice. The issue closes itself when the record passes again. An
+extension whose tests fail on every Querya version is left out the same way.
+
+When Querya Desktop publishes a release, its Release hooks send a
+`querya-release` dispatch with the version: the run tests every extension
+against that version too and `compat.json` gains a column for it. Raise
+`hosts.json` in a pull request when the new version should become a permanent
+column.
 
 ## The scripts
 
