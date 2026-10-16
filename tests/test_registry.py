@@ -118,6 +118,53 @@ class Check(Case):
         self.assertEqual(self.check(path, self.record(path))[0], 1)
 
 
+class ManifestVersion(Case):
+    def entry(self, **manifest_over):
+        archive = self.zip(manifest=dict(MANIFEST, **manifest_over))
+        code, out = self.check(archive, self.record(archive))
+        return code, (json.loads(out.read_text()) if code == 0 else None)
+
+    def test_absent_is_format_one_and_the_entry_says_so(self):
+        code, entry = self.entry()
+        self.assertEqual(code, 0)
+        self.assertEqual(entry["manifestVersion"], 1)
+
+    def test_explicit_format_one(self):
+        code, entry = self.entry(manifestVersion=1)
+        self.assertEqual((code, entry["manifestVersion"]), (0, 1))
+
+    def test_a_format_that_is_not_defined_yet_is_refused(self):
+        self.assertEqual(self.entry(manifestVersion=2)[0], 1)
+
+    def test_not_a_whole_number(self):
+        for bad in (0, -1, 1.5, "1", True, None, []):
+            self.assertEqual(self.entry(manifestVersion=bad)[0], 1, repr(bad))
+
+    def test_platforms_must_agree_on_the_format(self):
+        original = registry.MAX_MANIFEST_VERSION
+        registry.MAX_MANIFEST_VERSION = 2
+        try:
+            def build(name, manifest):
+                path = self.dir / f"{name}.zip"
+                with zipfile.ZipFile(path, "w") as zf:
+                    zf.writestr("manifest.json", json.dumps(manifest))
+                    zf.writestr("bin/driver", name)
+                return path
+            archives = {"linux-x64": build("l", dict(MANIFEST, manifestVersion=1)),
+                        "macos-arm64": build("m", dict(MANIFEST, manifestVersion=2))}
+            record = {"id": "acme.redis-driver", "version": "1.0.0", "platforms": {
+                k: {"downloadUrl": URL.replace("ext.zip", f"{k}.zip"),
+                    "sha256": hashlib.sha256(p.read_bytes()).hexdigest()} for k, p in archives.items()}}
+            path = self.dir / "acme.redis-driver.json"
+            path.write_text(json.dumps(record))
+            argv = ["check", str(path), "--out", str(self.dir / "e.json")]
+            for k, p in archives.items():
+                argv += ["--archive", f"{k}={p}"]
+            self.assertEqual(registry.main(argv), 1)
+        finally:
+            registry.MAX_MANIFEST_VERSION = original
+
+
 class Record(Case):
     def bad(self, **over):
         archive = self.zip()

@@ -36,6 +36,10 @@ IMAGE_RE = re.compile(r"^ghcr\.io/queryahub/querya-testdb-[a-z0-9-]+:[A-Za-z0-9.
 PLATFORMS = ("linux-x64", "macos-arm64", "macos-x64", "windows-x64")
 RECORD_KEYS = {"id", "version", "downloadUrl", "sha256", "platforms", "yanked", "testEnv"}
 TESTENV_KEYS = {"image", "port", "connect", "query", "table", "database"}
+# The newest manifest.json format Querya Desktop defines (`manifestVersion`, 1 when
+# absent). Raise it in the change that adds a format to Querya Desktop.
+MAX_MANIFEST_VERSION = 1
+
 # Fields copied from manifest.json into the index. The record never supplies them.
 MANIFEST_KEYS = [
     "id", "name", "version", "publisher", "type", "description", "icon", "engines",
@@ -180,7 +184,7 @@ def inspect_archive(path):
 
 
 # What every platform's manifest.json has to agree on (main may differ: bin/x vs bin/x.exe).
-SAME_ACROSS_PLATFORMS = ("id", "version", "name", "type", "engines")
+SAME_ACROSS_PLATFORMS = ("id", "version", "name", "type", "engines", "manifestVersion")
 
 
 def base_entry(record, manifest):
@@ -194,7 +198,20 @@ def base_entry(record, manifest):
     engines = manifest.get("engines")
     if not isinstance(engines, dict) or not isinstance(engines.get("querya_desktop"), str):
         raise CheckError('manifest.json needs engines.querya_desktop, for example ">=0.4.19"')
-    return {k: manifest[k] for k in MANIFEST_KEYS if k in manifest}
+    entry = {k: manifest[k] for k in MANIFEST_KEYS if k in manifest}
+    entry["manifestVersion"] = manifest_version(manifest)
+    return entry
+
+
+def manifest_version(manifest):
+    """manifestVersion of manifest.json: a whole number >= 1, 1 when absent."""
+    value = manifest.get("manifestVersion", 1)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise CheckError(f"manifest.json manifestVersion must be a whole number, 1 or more, got {value!r}")
+    if value > MAX_MANIFEST_VERSION:
+        raise CheckError(
+            f"manifest.json manifestVersion {value} is not defined yet; Querya Desktop reads formats up to {MAX_MANIFEST_VERSION}")
+    return value
 
 
 def sources_of(record):
