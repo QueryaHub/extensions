@@ -150,6 +150,9 @@ jobs:
   deploy:
     name: Deploy to Pages
     needs: index
+    # `test` is skipped when there are no records, and a skipped ancestor skips
+    # everything downstream unless the condition says otherwise.
+    if: always() && needs.index.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -165,7 +168,7 @@ jobs:
   report:
     name: Fail if a record was left out
     needs: [index, deploy]
-    if: needs.index.outputs.failed != ''
+    if: always() && needs.deploy.result == 'success' && needs.index.outputs.failed != ''
     runs-on: ubuntu-latest
     steps:
       - run: |
