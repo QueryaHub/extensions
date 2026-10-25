@@ -294,6 +294,14 @@ def cmd_check(args):
     if args.extract and testable is not None:
         with zipfile.ZipFile(testable) as zf:
             zf.extractall(args.extract)
+            # extractall drops the Unix mode, and the sandboxed test would run
+            # a driver binary that is no longer executable ("Permission
+            # denied"). Give back the execute bit the archive carries, nothing
+            # else (the entry names were validated above).
+            for info in zf.infolist():
+                if not info.is_dir() and (info.external_attr >> 16) & 0o111:
+                    target = Path(args.extract) / info.filename
+                    target.chmod(target.stat().st_mode | 0o755)
     if not args.keep_archive:
         for key in platforms:
             if key not in local:
