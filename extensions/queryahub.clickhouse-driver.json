@@ -1,0 +1,32 @@
+{
+  "id": "queryahub.clickhouse-driver",
+  "version": "1.0.3",
+  "platforms": {
+    "linux-x64": {
+      "downloadUrl": "https://github.com/QueryaHub/clickhouse-query-ext/releases/download/v1.0.3/clickhouse-query-ext-1.0.3-x86_64-unknown-linux-gnu.qext",
+      "sha256": "ca02db23d98633cd182d6bd5770f21b165523a2f0c4730c795fe1285932c6e83"
+    },
+    "macos-arm64": {
+      "downloadUrl": "https://github.com/QueryaHub/clickhouse-query-ext/releases/download/v1.0.3/clickhouse-query-ext-1.0.3-aarch64-apple-darwin.qext",
+      "sha256": "815e0cf9081ec7b4304f342660d58a1fc8fed1e69db9f784e7463a182fa0368f"
+    },
+    "macos-x64": {
+      "downloadUrl": "https://github.com/QueryaHub/clickhouse-query-ext/releases/download/v1.0.3/clickhouse-query-ext-1.0.3-x86_64-apple-darwin.qext",
+      "sha256": "dc86e5036cc87117214657de53eced1c35ad133da34b665bc8d4f5ad574b7eda"
+    },
+    "windows-x64": {
+      "downloadUrl": "https://github.com/QueryaHub/clickhouse-query-ext/releases/download/v1.0.3/clickhouse-query-ext-1.0.3-x86_64-pc-windows-msvc.qext",
+      "sha256": "706eafca617dfd0a0cee2cd988408c02fad7c53ace36e865064b980583a7cb9e"
+    }
+  },
+  "testEnv": {
+    "image": "ghcr.io/queryahub/querya-testdb-clickhouse:0.4.19",
+    "port": 8123,
+    "connect": {
+      "username": "querya",
+      "password": "querya"
+    },
+    "database": "querya",
+    "query": "SELECT count() FROM querya.customers"
+  }
+}
