@@ -80,6 +80,12 @@ runs:
       continue-on-error: true
       uses: QueryaHub/Querya-Desktop/.github/actions/test-extension@33c8853ea97f22ed0dc626dca7ca6320cc6b066a
       with:
+        # "latest" is the newest stable Querya Desktop, whose tester (0.4.19)
+        # does not send the --connect password with system.injectCredentials,
+        # so a driver that reads its password from the injected secret cannot
+        # log in (ClickHouse: AUTHENTICATION_FAILED). 0.5.0-beta.1 has the fix;
+        # go back to "latest" once a stable release carries it.
+        querya-version: "0.5.0-beta.1"
         extension-dir: ${{ steps.check.outputs.ext }}
         target-version: ${{ inputs.host }}
         connect: ${{ steps.check.outputs.connect }}
