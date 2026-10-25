@@ -274,6 +274,22 @@ class Platforms(Case):
         self.assertEqual(self.run_check(archives, self.record(archives), extract)[0], 0)
         self.assertEqual((extract / "bin" / "driver").read_text(), "l")
 
+    def test_an_executable_binary_stays_executable_when_extracted(self):
+        path = self.dir / "linux-x64.zip"
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("manifest.json", json.dumps(MANIFEST))
+            info = zipfile.ZipInfo("bin/driver")
+            info.external_attr = 0o100755 << 16
+            zf.writestr(info, "l")
+            plain = zipfile.ZipInfo("assets/note.txt")
+            plain.external_attr = 0o100644 << 16
+            zf.writestr(plain, "n")
+        archives = {"linux-x64": path}
+        extract = self.dir / "ext"
+        self.assertEqual(self.run_check(archives, self.record(archives), extract)[0], 0)
+        self.assertTrue((extract / "bin" / "driver").stat().st_mode & 0o111)
+        self.assertFalse((extract / "assets" / "note.txt").stat().st_mode & 0o111)
+
     def test_no_linux_build_means_nothing_to_extract_or_test(self):
         archives = {"macos-arm64": self.build("m")}
         extract = self.dir / "ext"
